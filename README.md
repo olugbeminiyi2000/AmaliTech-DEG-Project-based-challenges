@@ -12,13 +12,23 @@ Every path starts when a request arrives and ends with exactly one HTTP response
 
 ```mermaid
 flowchart TD
-    A([POST /process-payment]) --> B{Idempotency-Key header present?}
-    B -- No --> R1([400 Bad Request, missing Idempotency-Key])
-    B -- Yes --> C1{amount is a number greater than 0?}
-    C1 -- No --> R2([400 Bad Request, invalid body, key not stored])
-    C1 -- Yes --> C2{currency is a 3-letter code?}
+    A([POST /process-payment]) --> B1{Idempotency-Key header present and not blank?}
+    B1 -- No --> R1([400 Bad Request, invalid Idempotency-Key])
+    B1 -- Yes --> B2{Key at most 255 characters?}
+    B2 -- No --> R1
+    B2 -- Yes --> C0{Body is a valid JSON object with no duplicate fields?}
+    C0 -- No --> R2([400 Bad Request, invalid body, key not stored])
+    C0 -- Yes --> C1{Fields are exactly amount and currency?}
+    C1 -- No --> R2
+    C1 -- Yes --> C2{amount is a JSON number, not a string or boolean?}
     C2 -- No --> R2
-    C2 -- Yes --> D[Hash the canonical body]
+    C2 -- Yes --> C3{amount greater than 0?}
+    C3 -- No --> R2
+    C3 -- Yes --> C4{amount has at most 2 decimal places?}
+    C4 -- No --> R2
+    C4 -- Yes --> C5{currency is GHS, NGN, USD, EUR or GBP?}
+    C5 -- No --> R2
+    C5 -- Yes --> D[Hash the canonical body]
     D --> E1{Record exists for this key?}
     E1 -- No --> F[Create record, state = PROCESSING, save body hash]
     E1 -- Yes --> E2{Record expired? Only COMPLETED records have an expiry}
@@ -45,41 +55,18 @@ flowchart TD
     N -- Max wait reached --> R7([503 Service Unavailable, Retry-After header, record kept])
 ```
 
-### Shapes
+### Validation rules
 
-| Shape | Meaning |
+Checks run in this order. The first one that fails returns `400 Bad Request` with a JSON body of the form `{"error": "<what went wrong>"}`, and nothing is stored for the key.
+
+| Check | Rule |
 |---|---|
-| Oval | Start or end of the flow (a request arrives, or a response is sent) |
-| Diamond | A decision; each outgoing arrow is labelled with an answer |
-| Rectangle | An action the server performs |
+| Idempotency key | `Idempotency-Key` header is present, not blank, and at most 255 characters |
+| JSON | Body is a valid JSON object with no duplicate fields. `NaN` and `Infinity` are rejected |
+| Fields | Exactly `amount` and `currency`, no other fields |
+| Amount type | `amount` is a JSON number. Strings such as `"100"` and booleans are rejected |
+| Amount value | `amount` is greater than 0 |
+| Amount precision | `amount` has at most 2 decimal places. `100.50` and `100.500` are both accepted as the same value; `100.555` is rejected |
+| Currency | `currency` is one of `GHS`, `NGN`, `USD`, `EUR`, `GBP`. All five use 2 decimal places, which is why the precision rule holds for every supported currency |
 
-### What is stored for each key
-
-```
-key -> {
-    state:      PROCESSING or COMPLETED
-    body_hash:  SHA-256 of the canonical request body
-    response:   saved status code and body (COMPLETED only)
-    expires_at: when the record can be forgotten (COMPLETED only)
-}
-```
-
-A record moves through these states:
-
-- **PROCESSING**: a charge for this key is happening right now. It has no expiry, because forgetting it mid-charge could allow a second charge. It always ends within the bank timeout, either by becoming COMPLETED or by being deleted on failure.
-- **COMPLETED**: the result is saved and replayed to any retry. Its expiry clock starts here.
-- **Expired or deleted**: the key is treated as never seen.
-
-### Cases handled
-
-| # | Situation | Response |
-|---|---|---|
-| 1 | No `Idempotency-Key` header | `400`, nothing stored |
-| 2 | Invalid body (amount missing or not greater than 0, currency not a 3-letter code) | `400`, key not stored so the client can fix the body and reuse the key |
-| 3 | New key, or a key whose record has expired | Store as PROCESSING, call the bank (simulated 2 seconds), save, `201` with `X-Cache-Hit: false` |
-| 4 | Known key, different body (any state) | `422` "Idempotency key already used for a different request body." |
-| 5 | Known key, same body, COMPLETED | Replay the saved status code and body with `X-Cache-Hit: true`, no delay |
-| 6 | Known key, same body, still PROCESSING | Wait for the first request's result, then replay it with `X-Cache-Hit: true` |
-| 7 | Error during processing, including the bank call timing out | Delete the record, `500`, so a retry gets a fresh attempt |
-| 8 | A waiting request (case 6) whose first request fails | `500`; the first request has already deleted the record, so the retry starts fresh |
-| 9 | A waiting request (case 6) reaches its maximum wait | `503` with a `Retry-After` header; the record is kept so the retry finds the result |
+Amounts are handled as `Decimal`, never `float`, so values such as `0.10` are stored exactly.
