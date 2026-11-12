@@ -8,6 +8,9 @@ from app.config import Settings
 from app.main import create_app
 
 DELAY = 0.3
+# asyncio can end a sleep up to one clock tick early (15.6 ms on Windows),
+# so "took at least the delay" checks allow this much slack
+CLOCK_TOLERANCE = 0.05
 FAST = Settings(
     processing_delay_seconds=DELAY,
     bank_timeout_seconds=2.0,
@@ -53,7 +56,7 @@ async def test_first_request_is_processed_and_charged():
     assert response.status_code == 201
     assert response.json()["message"] == "Charged 100 GHS"
     assert response.headers["X-Cache-Hit"] == "false"
-    assert elapsed >= DELAY
+    assert elapsed >= DELAY - CLOCK_TOLERANCE
     assert app.state.bank.charge_count == 1
 
 
