@@ -49,6 +49,17 @@ def create_app(settings: Optional[Settings] = None, bank: Optional[SimulatedBank
     app.state.store = store
     app.state.bank = bank
 
+    generate_openapi = app.openapi
+
+    def openapi() -> dict:
+        # Build the schema once with FastAPI's generator, then describe the
+        # headers as string, number and boolean for /docs
+        if app.openapi_schema is None:
+            api_docs.apply_header_schemas(generate_openapi())
+        return app.openapi_schema
+
+    app.openapi = openapi
+
     @app.get("/", include_in_schema=False)
     async def root() -> RedirectResponse:
         return RedirectResponse("/docs")

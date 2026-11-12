@@ -326,7 +326,11 @@ async def test_api_docs_describe_headers_body_and_responses():
         spec = (await client.get("/openapi.json")).json()
 
     operation = spec["paths"]["/process-payment"]["post"]
-    header_names = {p["name"] for p in operation["parameters"] if p["in"] == "header"}
-    assert header_names == {"Idempotency-Key", "X-Simulate-Bank-Delay", "X-Simulate-Bank-Failure"}
+    header_types = {p["name"]: p["schema"]["type"] for p in operation["parameters"] if p["in"] == "header"}
+    assert header_types == {
+        "Idempotency-Key": "string",
+        "X-Simulate-Bank-Delay": "number",
+        "X-Simulate-Bank-Failure": "boolean",
+    }
     assert operation["requestBody"]["content"]["application/json"]["example"] == {"amount": 100, "currency": "GHS"}
     assert {"201", "400", "422", "500", "503"} <= set(operation["responses"])
