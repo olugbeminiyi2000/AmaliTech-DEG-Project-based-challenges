@@ -1,0 +1,14 @@
+# Virtual environment
+.venv/
+
+# Python bytecode and caches
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Local secrets
+.env
+
+# OS files
+.DS_Store
+Thumbs.db
