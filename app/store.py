@@ -46,7 +46,7 @@ class IdempotencyStore:
         self._records: Dict[str, Record] = {}
 
     def get(self, key: str) -> Optional[Record]:
-        """Return the live record for a key, or None (boxes E1, E2, E3)."""
+        """Return the live record for a key, or None if there is none or it expired."""
         record = self._records.get(key)
         if record is None:
             return None
@@ -56,20 +56,20 @@ class IdempotencyStore:
         return record
 
     def create(self, key: str, body_hash: str) -> Record:
-        """Claim a key with a new PROCESSING record (box F)."""
+        """Claim a key with a new PROCESSING record."""
         record = Record(body_hash=body_hash)
         self._records[key] = record
         return record
 
     def complete(self, record: Record, response: SavedResponse, ttl_seconds: float) -> None:
-        """Save the result and wake waiters (boxes I and W1)."""
+        """Save the result and wake any waiting requests."""
         record.state = State.COMPLETED
         record.response = response
         record.expires_at = self._clock() + ttl_seconds
         record.done.set()
 
     def fail(self, key: str, record: Record) -> None:
-        """Delete the record so a retry starts fresh, then wake waiters (boxes J and W2)."""
+        """Delete the record so a retry starts fresh, then wake any waiting requests."""
         if self._records.get(key) is record:
             del self._records[key]
         record.failed = True

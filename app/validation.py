@@ -1,8 +1,7 @@
 """Request validation for POST /process-payment.
 
-Each check matches a decision box in the README flowchart (B1, B2, C0 to C5)
-and runs in the same order. The first failing check raises ValidationFailed,
-which the API turns into a 400 response.
+The checks run in the same order as the README flowchart. The first failing
+check raises ValidationFailed, which the API turns into a 400 response.
 """
 
 import json
@@ -31,11 +30,11 @@ class PaymentRequest:
 
 
 def validate_idempotency_key(key: Optional[str]) -> str:
-    # B1: header present and not blank
+    # Header present and not blank
     if key is None or key.strip() == "":
         raise ValidationFailed("Missing Idempotency-Key header.")
 
-    # B2: key at most 255 characters
+    # Key at most 255 characters
     if len(key) > MAX_KEY_LENGTH:
         raise ValidationFailed(
             f"Idempotency-Key must be at most {MAX_KEY_LENGTH} characters."
@@ -45,10 +44,10 @@ def validate_idempotency_key(key: Optional[str]) -> str:
 
 
 def parse_payment_body(raw_body: bytes) -> PaymentRequest:
-    # C0: valid JSON object with no duplicate fields
+    # Valid JSON object with no duplicate fields
     body = _parse_json_object(raw_body)
 
-    # C1: exactly amount and currency
+    # Exactly amount and currency
     if set(body.keys()) != REQUIRED_FIELDS:
         raise ValidationFailed(
             "Request body must contain exactly the fields amount and currency."
@@ -57,24 +56,24 @@ def parse_payment_body(raw_body: bytes) -> PaymentRequest:
     amount = body["amount"]
     currency = body["currency"]
 
-    # C2: amount is a JSON number, not a string or boolean.
+    # amount is a JSON number, not a string or boolean.
     # bool is checked first because in Python True and False are also ints.
     if isinstance(amount, bool) or not isinstance(amount, (int, Decimal)):
         raise ValidationFailed("amount must be a number.")
     amount = Decimal(amount)
 
-    # C3: amount greater than 0
+    # amount greater than 0
     if amount <= 0:
         raise ValidationFailed("amount must be greater than 0.")
 
-    # C4: at most 2 decimal places. normalize() drops trailing zeros first,
+    # At most 2 decimal places. normalize() drops trailing zeros first,
     # so 100.500 is treated as 100.5 and accepted.
     if -amount.normalize().as_tuple().exponent > MAX_DECIMAL_PLACES:
         raise ValidationFailed(
             f"amount must have at most {MAX_DECIMAL_PLACES} decimal places."
         )
 
-    # C5: currency is in the supported list
+    # currency is in the supported list
     if not isinstance(currency, str) or currency not in SUPPORTED_CURRENCIES:
         supported = ", ".join(sorted(SUPPORTED_CURRENCIES))
         raise ValidationFailed(f"currency must be one of: {supported}.")

@@ -96,7 +96,7 @@ def create_app(settings: Optional[Settings] = None, bank: Optional[SimulatedBank
         response immediately with X-Cache-Hit: true. Reusing the key with a
         different body returns 422.
         """
-        # B1 to C5: validate before touching the store
+        # Validate the key and body before touching the store
         try:
             key = validate_idempotency_key(idempotency_key)
             payment = parse_payment_body(await request.body())
@@ -108,25 +108,25 @@ def create_app(settings: Optional[Settings] = None, bank: Optional[SimulatedBank
         except ValidationFailed as error:
             return _error(400, error.message)
 
-        # D
+        # Fingerprint the body so a retry can be compared with the first request
         body_hash = canonical_body_hash(payment)
 
-        # E1 to F: no await between get() and create(), so no other request
+        # No await between get() and create(), so no other request
         # can claim the same key in between
         record = store.get(key)
         if record is None:
             record = store.create(key, body_hash)
             return await _process_new_payment(key, record, payment, simulation)
 
-        # K
+        # Same key, different body
         if record.body_hash != body_hash:
             return _error(422, KEY_REUSED_MESSAGE)
 
-        # L
+        # Already finished: replay the saved response
         if record.state is State.COMPLETED:
             return _replay(record)
 
-        # M, N: still PROCESSING, so wait for the first request to finish
+        # Still processing: wait for the first request to finish
         try:
             await asyncio.wait_for(record.done.wait(), timeout=settings.max_wait_seconds)
         except asyncio.TimeoutError:
@@ -138,7 +138,7 @@ def create_app(settings: Optional[Settings] = None, bank: Optional[SimulatedBank
     async def _process_new_payment(
         key: str, record: Record, payment: PaymentRequest, simulation: BankSimulation
     ) -> JSONResponse:
-        # G, H
+        # Call the bank, giving up after the bank timeout
         try:
             transaction_id = await asyncio.wait_for(
                 bank.charge(payment, delay_seconds=simulation.delay_seconds, fail=simulation.fail),
@@ -150,11 +150,11 @@ def create_app(settings: Optional[Settings] = None, bank: Optional[SimulatedBank
             store.fail(key, record)
             raise
         except Exception:
-            # J, W2: any error, including the bank timing out
+            # Any error, including the bank timing out: release the key
             store.fail(key, record)
             return _error(500, PROCESSING_FAILED_MESSAGE)
 
-        # I, W1
+        # Success: save the response so retries can replay it
         response = SavedResponse(
             status_code=201,
             body={
@@ -171,7 +171,6 @@ def create_app(settings: Optional[Settings] = None, bank: Optional[SimulatedBank
 
 
 def _replay(record: Record) -> JSONResponse:
-    # P, R6
     saved = record.response
     return JSONResponse(saved.body, status_code=saved.status_code, headers={"X-Cache-Hit": "true"})
 

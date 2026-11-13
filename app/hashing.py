@@ -1,4 +1,4 @@
-"""Canonical fingerprint of a payment body (flowchart box D)."""
+"""Canonical fingerprint of a payment body."""
 
 import hashlib
 import json
