@@ -1,4 +1,4 @@
-# Silk Idempotency Gateway
+# FinSafe Idempotency Gateway
 
 A payment-processing API that charges each payment **at most once**, no matter how many times a client retries the same request.
 

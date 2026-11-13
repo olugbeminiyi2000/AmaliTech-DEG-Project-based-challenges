@@ -42,7 +42,7 @@ def create_app(settings: Optional[Settings] = None, bank: Optional[SimulatedBank
         cleaner.cancel()
 
     app = FastAPI(
-        title="Silk Idempotency Gateway",
+        title="FinSafe Idempotency Gateway",
         description="Processes each payment at most once, no matter how many times a client retries.",
         lifespan=lifespan,
     )
