@@ -11,6 +11,7 @@ A payment-processing API that charges each payment **at most once**, no matter h
 - [3. Setup](#3-setup)
 - [4. API Documentation](#4-api-documentation)
 - [5. Design Decisions](#5-design-decisions)
+- [6. Developer's Choice: Key Expiry](#6-developers-choice-key-expiry)
 
 ---
 
@@ -604,3 +605,49 @@ The headers that make the simulated bank slow or fail are useful for testing, bu
 | No authentication | Anyone who can reach the server can send payments | Authenticate each client, for example with an API key |
 | Keys are not separated by client | Two clients that happen to use the same key string would collide: one would receive `422`, or a replay of the other's response | Store keys per client, so each client has its own key space |
 | Uncertain bank failures | See 5.9 | Pass an idempotency key or reference on to the bank |
+
+---
+
+## 6. Developer's Choice: Key Expiry
+
+### 6.1 The problem
+
+Without expiry, every key the gateway has ever seen stays in memory for as long as the server runs. Each payment adds a record (the key, the body fingerprint, the saved response), so memory use grows with every payment and never shrinks. A busy payment processor would eventually run out of memory and crash. Because the keys are kept in memory, a crash also loses every key, so retries arriving after the restart would be charged again. A safety layer that slowly brings the payment service down is worse than having none.
+
+Keeping a key forever is also unnecessary. Retries happen within seconds or minutes of the original request, not weeks later.
+
+### 6.2 What it does
+
+- When a payment completes, its record gets an expiry time: now plus `KEY_TTL_SECONDS` (24 hours by default).
+- Expired records are removed in two ways:
+  - **When the key is used again:** if a request arrives with a key whose record has expired, the record is deleted and the request is handled as a new payment.
+  - **By a background task:** every `CLEANUP_INTERVAL_SECONDS` (60 seconds by default), a task that starts with the server removes every expired record, including keys that are never used again.
+- Records still in `PROCESSING` never expire, because forgetting a key while its charge is in progress would allow a second charge (see 5.10).
+
+### 6.3 Why 24 hours
+
+24 hours is far longer than any realistic retry: automatic retries happen within seconds, and even a client recovering from an outage retries within hours. It also matches common practice in payment APIs; Stripe, for example, keeps idempotency keys for at least 24 hours. The value can be changed with `KEY_TTL_SECONDS`.
+
+The trade-off is that a retry arriving after its key has expired is treated as a new payment. The expiry time therefore has to be much longer than any retry window, which is why it is measured in hours rather than minutes.
+
+### 6.4 Where it is in the code
+
+| File | What it does |
+|---|---|
+| `app/store.py` | `complete()` sets the expiry time. `get()` deletes an expired record when its key is used again. `purge_expired()` removes all expired records |
+| `app/main.py` | `_remove_expired_keys()` is the background task. It is started when the server starts and stopped when it shuts down |
+| `app/config.py` | `KEY_TTL_SECONDS` and `CLEANUP_INTERVAL_SECONDS` |
+
+### 6.5 How to see it working
+
+Start the server with a 30 second expiry (see 3.5 Configuration for each shell), for example in Git Bash:
+
+```
+KEY_TTL_SECONDS=30 .venv/Scripts/python -m app
+```
+
+1. Send a payment with a new key. It returns `201` with `x-cache-hit: false`. Note the `transaction_id`.
+2. Send the same request within 30 seconds. It returns immediately with the same `transaction_id` and `x-cache-hit: true`.
+3. Wait more than 30 seconds and send it again. It takes about 2 seconds and returns `201` with a new `transaction_id` and `x-cache-hit: false`: the key was forgotten.
+
+The automated tests `test_expired_key_is_processed_as_new` and `test_purge_removes_only_expired_keys` in `tests/test_api.py` check the same behaviour.
