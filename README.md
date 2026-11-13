@@ -81,6 +81,27 @@ flowchart TD
     N -- Max wait reached --> R7([503 Service Unavailable, Retry-After header, record kept])
 ```
 
+### Project structure
+
+What each file does.
+
+| File | What it does |
+|---|---|
+| `app/__main__.py` | Start command: `python -m app` runs the server. Reads `HOST` and `PORT` |
+| `app/main.py` | Creates the app. `POST /process-payment` follows the flowchart from top to bottom and builds every response. Also `GET /health`, the redirect from `/` to `/docs`, and the background task that removes expired keys |
+| `app/validation.py` | Checks the `Idempotency-Key` header and the request body, in the flowchart's order. Parses the amount as `Decimal` |
+| `app/hashing.py` | Turns a valid body into its canonical SHA-256 fingerprint |
+| `app/store.py` | The in-memory key store: looks up, claims, completes, fails and expires records, and wakes waiting requests |
+| `app/bank.py` | The simulated delayed bank call. Returns a transaction id |
+| `app/config.py` | Settings and their defaults, read from environment variables |
+| `app/simulation.py` | Reads the `X-Simulate-Bank-*` headers when simulation mode is on |
+| `app/api_docs.py` | Descriptions of the headers, body and responses shown on `/docs` |
+| `tests/test_validation.py` | Tests for every validation rule |
+| `tests/test_api.py` | Tests for every user story, the in-flight bonus, failures, timeouts, expiry and the API docs |
+| `tests/test_config.py` | Tests for reading settings from environment variables |
+| `requirements.txt` | Exact versions of the packages to install |
+| `pytest.ini` | Test runner settings |
+
 ### Validation rules
 
 Checks run in this order. The first one that fails returns `400 Bad Request` with a JSON body of the form `{"error": "<what went wrong>"}`, and nothing is stored for the key.
