@@ -2,13 +2,24 @@
 
 A payment-processing API that charges each payment **at most once**, no matter how many times a client retries the same request.
 
-## Overview
+---
 
-### The problem
+## Contents
+
+- [1. Overview](#1-overview)
+- [2. Architecture](#2-architecture)
+- [3. Setup](#3-setup)
+- [4. API Documentation](#4-api-documentation)
+
+---
+
+## 1. Overview
+
+### 1.1 The problem
 
 When a customer clicks "Pay", the online store's server sends a payment request to the payment processor. If the network times out, the store cannot tell what happened. The request may have been lost before it arrived, or the payment may have gone through and only the response was lost. The store's server retries the request automatically (and the customer may also click "Pay" again). If the payment processor treats the retry as a new payment, the customer is charged twice.
 
-### The solution
+### 1.2 The solution
 
 Every payment request carries an `Idempotency-Key` header: a unique id the client creates once per payment and sends again with every retry of that payment. The gateway remembers each key and what happened to it:
 
@@ -19,7 +30,7 @@ Every payment request carries an `Idempotency-Key` header: a unique id the clien
 
 Completed keys are forgotten after 24 hours by default, and a background task removes them every 60 seconds, so memory does not grow forever. This is the Developer's Choice feature.
 
-### Tech stack
+### 1.3 Tech stack
 
 | Component | Used for |
 |---|---|
@@ -30,9 +41,11 @@ Completed keys are forgotten after 24 hours by default, and a background task re
 
 Keys are kept in memory, in a Python dictionary. There is no database.
 
-## Architecture
+---
 
-### Request flow
+## 2. Architecture
+
+### 2.1 Request flow
 
 Every path starts when a request arrives and ends with exactly one HTTP response.
 
@@ -81,7 +94,7 @@ flowchart TD
     N -- Max wait reached --> R7([503 Service Unavailable, Retry-After header, record kept])
 ```
 
-### Project structure
+### 2.2 Project structure
 
 What each file does.
 
@@ -102,30 +115,16 @@ What each file does.
 | `requirements.txt` | Exact versions of the packages to install |
 | `pytest.ini` | Test runner settings |
 
-### Validation rules
+---
 
-Checks run in this order. The first one that fails returns `400 Bad Request` with a JSON body of the form `{"error": "<what went wrong>"}`, and nothing is stored for the key.
+## 3. Setup
 
-| Check | Rule |
-|---|---|
-| Idempotency key | `Idempotency-Key` header is present, not blank, and at most 255 characters |
-| JSON | Body is a valid JSON object with no duplicate fields. `NaN` and `Infinity` are rejected |
-| Fields | Exactly `amount` and `currency`, no other fields |
-| Amount type | `amount` is a JSON number. Strings such as `"100"` and booleans are rejected |
-| Amount value | `amount` is greater than 0 |
-| Amount precision | `amount` has at most 2 decimal places. `100.50` and `100.500` are both accepted as the same value; `100.555` is rejected |
-| Currency | `currency` is one of `GHS`, `NGN`, `USD`, `EUR`, `GBP`. All five use 2 decimal places, which is why the precision rule holds for every supported currency |
-
-Amounts are handled as `Decimal`, never `float`, so values such as `0.10` are stored exactly.
-
-## Setup
-
-### Requirements
+### 3.1 Requirements
 
 - Python 3.12 (the version this project was built and tested with, on Windows 11)
 - Git
 
-### Install
+### 3.2 Install
 
 Clone the repository:
 
@@ -142,7 +141,7 @@ Create a virtual environment and install the packages:
 | Git Bash on Windows | `py -3.12 -m venv .venv` then `.venv/Scripts/python -m pip install -r requirements.txt` |
 | macOS or Linux | `python3.12 -m venv .venv` then `.venv/bin/python -m pip install -r requirements.txt` |
 
-### Run the server
+### 3.3 Run the server
 
 | Shell | Command |
 |---|---|
@@ -157,7 +156,7 @@ The server starts on `http://127.0.0.1:8000`:
 
 Stop the server with `Ctrl+C`.
 
-### Run the tests
+### 3.4 Run the tests
 
 | Shell | Command |
 |---|---|
@@ -167,7 +166,7 @@ Stop the server with `Ctrl+C`.
 
 All 67 tests should pass in about 10 seconds.
 
-### Configuration
+### 3.5 Configuration
 
 Every setting has a default, so the server runs without any configuration. To change a setting, set an environment variable before starting the server.
 
@@ -178,7 +177,7 @@ Every setting has a default, so the server runs without any configuration. To ch
 | `MAX_WAIT_SECONDS` | `10` | How long a duplicate request waits for an identical in-flight request before returning `503` |
 | `KEY_TTL_SECONDS` | `86400` (24 hours) | How long a completed key is remembered |
 | `CLEANUP_INTERVAL_SECONDS` | `60` | How often the background task removes expired keys |
-| `SIMULATION_MODE` | `false` | Turns on the `X-Simulate-Bank-*` headers (see below) |
+| `SIMULATION_MODE` | `false` | Turns on the `X-Simulate-Bank-*` headers (see 3.6 Simulation mode) |
 | `HOST` | `127.0.0.1` | Address the server listens on |
 | `PORT` | `8000` | Port the server listens on |
 
@@ -195,7 +194,7 @@ Setting variables differs between shells. For example, to start with simulation 
 
 In cmd and PowerShell the variables stay set until that terminal is closed, so later commands in the same terminal use them too. In Git Bash, macOS and Linux, the form above applies only to that one command. In cmd, there is no space before `&`, because cmd would otherwise include the space in the value.
 
-### Simulation mode
+### 3.6 Simulation mode
 
 The bank is simulated: every payment takes `PROCESSING_DELAY_SECONDS` and succeeds. To test what happens when the bank is slow or fails, start the server with `SIMULATION_MODE=true`. Two optional request headers then control the simulated bank for that one request:
 
@@ -203,3 +202,281 @@ The bank is simulated: every payment takes `PROCESSING_DELAY_SECONDS` and succee
 - `X-Simulate-Bank-Failure`: `true` makes the bank fail with `500`.
 
 Simulation mode is off by default so that a running server cannot be told by its callers to slow down or fail. When it is off, both headers are ignored whatever their value. When it is on, an invalid value (for example a delay of `abc`) is rejected with `400`.
+
+---
+
+## 4. API Documentation
+
+While the server is running, the same information is available as interactive documentation at `http://127.0.0.1:8000/docs`, where every request can be sent from the browser.
+
+### 4.1 Endpoints
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/process-payment` | Charge a payment exactly once per `Idempotency-Key` |
+| `GET` | `/health` | Confirm the server is running and whether simulation mode is on |
+| `GET` | `/docs` | Interactive API documentation |
+| `GET` | `/openapi.json` | The API description in OpenAPI format, used by `/docs` |
+| `GET` | `/` | Redirects to `/docs` |
+
+### 4.2 POST /process-payment
+
+#### 4.2.1 Request headers
+
+| Header | Required | Description |
+|---|---|---|
+| `Idempotency-Key` | Yes | Unique id for this payment, created by the client. Send the same key when retrying the same payment. At most 255 characters |
+| `Content-Type` | Yes | `application/json` |
+| `X-Simulate-Bank-Delay` | No | Simulation mode only. Seconds the simulated bank takes for this request, from `0` to `30` |
+| `X-Simulate-Bank-Failure` | No | Simulation mode only. `true` makes the simulated bank fail this request |
+
+#### 4.2.2 Request body
+
+```json
+{"amount": 100, "currency": "GHS"}
+```
+
+| Field | Type | Rules |
+|---|---|---|
+| `amount` | JSON number | Greater than 0, at most 2 decimal places. A string such as `"100"` is rejected |
+| `currency` | string | One of `GHS`, `NGN`, `USD`, `EUR`, `GBP` |
+
+#### 4.2.3 Validation
+
+The checks run in this order. The first one that fails returns `400 Bad Request` with a body of the form `{"error": "<what went wrong>"}`, and nothing is stored for the key, so the client can correct the request and send it again with the same key.
+
+| Check | Rule |
+|---|---|
+| Idempotency key | `Idempotency-Key` header is present, not blank, and at most 255 characters |
+| JSON | Body is a valid JSON object with no duplicate fields. `NaN` and `Infinity` are rejected |
+| Fields | Exactly `amount` and `currency`, no other fields |
+| Amount type | `amount` is a JSON number. Strings such as `"100"` and booleans are rejected |
+| Amount value | `amount` is greater than 0 |
+| Amount precision | `amount` has at most 2 decimal places. `100.50` and `100.500` are both accepted as the same value; `100.555` is rejected |
+| Currency | `currency` is one of `GHS`, `NGN`, `USD`, `EUR`, `GBP`. All five use 2 decimal places, which is why the precision rule holds for every supported currency |
+| Simulation headers | Only when simulation mode is on: `X-Simulate-Bank-Delay` is a number from `0` to `30`, and `X-Simulate-Bank-Failure` is `true` or `false` |
+
+#### 4.2.4 Responses
+
+| Status | When | Body | Headers |
+|---|---|---|---|
+| `201 Created` | The payment was charged, or this is a replay of an earlier identical request | Payment result (below) | `X-Cache-Hit: false` when processed now, `true` when replayed |
+| `400 Bad Request` | A validation check failed | `{"error": "..."}` naming the problem | |
+| `422 Unprocessable Entity` | The key was already used with a different body | `{"error": "Idempotency key already used for a different request body."}` | |
+| `500 Internal Server Error` | The bank failed or took longer than `BANK_TIMEOUT_SECONDS`. The key is released, so a retry with the same key is processed fresh | `{"error": "Payment processing failed. Retry with the same Idempotency-Key."}` | |
+| `503 Service Unavailable` | An identical request is still processing and this request waited `MAX_WAIT_SECONDS` without a result. The key is kept, so a retry gets the first request's result | `{"error": "A request with this Idempotency-Key is still processing. Retry shortly."}` | `Retry-After: 1` |
+
+Payment result fields:
+
+| Field | Example | Description |
+|---|---|---|
+| `message` | `"Charged 100 GHS"` | Human-readable result |
+| `transaction_id` | `"txn_c73d3c37ca9541e09ddf3bfd2832fc8f"` | Id of the charge. A replayed response has the same id as the original, which shows no second charge happened |
+| `amount` | `"100"` | The amount charged, as a string so it stays exact |
+| `currency` | `"GHS"` | The currency charged |
+
+### 4.3 Example requests
+
+The responses below were produced by the running server; only the `date`, `server` and `content-length` headers are left out. The commands use Git Bash, macOS and Linux syntax. In Windows cmd, write the body as `-d "{\"amount\": 100, \"currency\": \"GHS\"}"`. In PowerShell, type `curl.exe` instead of `curl` and write the body as `-d '{\"amount\": 100, \"currency\": \"GHS\"}'`.
+
+#### 4.3.1 First payment
+
+Takes about 2 seconds.
+
+```
+curl -i -X POST http://127.0.0.1:8000/process-payment \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: order-1001" \
+  -d '{"amount": 100, "currency": "GHS"}'
+```
+
+```
+HTTP/1.1 201 Created
+x-cache-hit: false
+content-type: application/json
+
+{"message":"Charged 100 GHS","transaction_id":"txn_c73d3c37ca9541e09ddf3bfd2832fc8f","amount":"100","currency":"GHS"}
+```
+
+#### 4.3.2 Retry of the same payment
+
+The same command again. Returns immediately with the same `transaction_id` and `x-cache-hit: true`.
+
+```
+HTTP/1.1 201 Created
+x-cache-hit: true
+content-type: application/json
+
+{"message":"Charged 100 GHS","transaction_id":"txn_c73d3c37ca9541e09ddf3bfd2832fc8f","amount":"100","currency":"GHS"}
+```
+
+#### 4.3.3 Same key, different amount
+
+```
+curl -i -X POST http://127.0.0.1:8000/process-payment \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: order-1001" \
+  -d '{"amount": 500, "currency": "GHS"}'
+```
+
+```
+HTTP/1.1 422 Unprocessable Entity
+content-type: application/json
+
+{"error":"Idempotency key already used for a different request body."}
+```
+
+#### 4.3.4 Two identical requests at the same time
+
+Send the same request twice, the second one while the first is still processing (within 2 seconds), for example from two terminals:
+
+```
+curl -i -X POST http://127.0.0.1:8000/process-payment \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: order-1006" \
+  -d '{"amount": 250.50, "currency": "USD"}'
+```
+
+Both return `201` with the same `transaction_id`. The first was processed; the second waited for it and replayed its result.
+
+```
+First request:
+HTTP/1.1 201 Created
+x-cache-hit: false
+content-type: application/json
+
+{"message":"Charged 250.50 USD","transaction_id":"txn_4660e1564529447aa884cfb05c8b79ba","amount":"250.50","currency":"USD"}
+
+Second request:
+HTTP/1.1 201 Created
+x-cache-hit: true
+content-type: application/json
+
+{"message":"Charged 250.50 USD","transaction_id":"txn_4660e1564529447aa884cfb05c8b79ba","amount":"250.50","currency":"USD"}
+```
+
+#### 4.3.5 Missing Idempotency-Key
+
+```
+curl -i -X POST http://127.0.0.1:8000/process-payment \
+  -H "Content-Type: application/json" \
+  -d '{"amount": 100, "currency": "GHS"}'
+```
+
+```
+HTTP/1.1 400 Bad Request
+content-type: application/json
+
+{"error":"Missing Idempotency-Key header."}
+```
+
+#### 4.3.6 Invalid body
+
+```
+curl -i -X POST http://127.0.0.1:8000/process-payment \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: order-1002" \
+  -d '{"amount": "100", "currency": "GHS"}'
+```
+
+```
+HTTP/1.1 400 Bad Request
+content-type: application/json
+
+{"error":"amount must be a number."}
+```
+
+#### 4.3.7 Bank failure (simulation mode)
+
+Start the server with `SIMULATION_MODE=true` (see 3.5 Configuration).
+
+```
+curl -i -X POST http://127.0.0.1:8000/process-payment \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: order-1003" \
+  -H "X-Simulate-Bank-Failure: true" \
+  -d '{"amount": 100, "currency": "GHS"}'
+```
+
+```
+HTTP/1.1 500 Internal Server Error
+content-type: application/json
+
+{"error":"Payment processing failed. Retry with the same Idempotency-Key."}
+```
+
+Sending the request again without the header processes it fresh and returns `201` with `x-cache-hit: false`.
+
+#### 4.3.8 Bank timeout (simulation mode)
+
+A delay of 8 seconds is longer than the default 5 second bank timeout, so the request fails after about 5 seconds.
+
+```
+curl -i -X POST http://127.0.0.1:8000/process-payment \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: order-1004" \
+  -H "X-Simulate-Bank-Delay: 8" \
+  -d '{"amount": 100, "currency": "GHS"}'
+```
+
+```
+HTTP/1.1 500 Internal Server Error
+content-type: application/json
+
+{"error":"Payment processing failed. Retry with the same Idempotency-Key."}
+```
+
+#### 4.3.9 Duplicate request that stops waiting (simulation mode)
+
+With the default settings this cannot happen, because the bank timeout (5 seconds) ends the first request before the maximum wait (10 seconds) runs out. To see it, start the server with `SIMULATION_MODE=true`, `BANK_TIMEOUT_SECONDS=20` and `MAX_WAIT_SECONDS=2` (see 3.5 Configuration for each shell), send a first request with `X-Simulate-Bank-Delay: 6`, and while it is processing send the same request without the delay header:
+
+```
+curl -i -X POST http://127.0.0.1:8000/process-payment \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: order-2001" \
+  -d '{"amount": 100, "currency": "GHS"}'
+```
+
+After 2 seconds:
+
+```
+HTTP/1.1 503 Service Unavailable
+retry-after: 1
+content-type: application/json
+
+{"error":"A request with this Idempotency-Key is still processing. Retry shortly."}
+```
+
+Once the first request has finished, sending the same request again replays its result with `x-cache-hit: true`.
+
+#### 4.3.10 Invalid simulation header
+
+On the `/docs` page, the browser itself refuses a non-numeric `X-Simulate-Bank-Delay` before sending the request. The server checks the value again for every other client, which can be seen with curl:
+
+```
+curl -i -X POST http://127.0.0.1:8000/process-payment \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: order-1005" \
+  -H "X-Simulate-Bank-Delay: abc" \
+  -d '{"amount": 100, "currency": "GHS"}'
+```
+
+```
+HTTP/1.1 400 Bad Request
+content-type: application/json
+
+{"error":"X-Simulate-Bank-Delay must be a number of seconds between 0 and 30."}
+```
+
+### 4.4 GET /health
+
+```
+curl -i http://127.0.0.1:8000/health
+```
+
+```
+HTTP/1.1 200 OK
+content-type: application/json
+
+{"status":"ok","simulation_mode":false}
+```
