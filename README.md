@@ -10,6 +10,7 @@ A payment-processing API that charges each payment **at most once**, no matter h
 - [2. Architecture](#2-architecture)
 - [3. Setup](#3-setup)
 - [4. API Documentation](#4-api-documentation)
+- [5. Design Decisions](#5-design-decisions)
 
 ---
 
@@ -480,3 +481,126 @@ content-type: application/json
 
 {"status":"ok","simulation_mode":false}
 ```
+
+---
+
+## 5. Design Decisions
+
+### 5.1 One process and one event loop: claiming a key is atomic without locks
+
+The server runs as one process. Uvicorn runs an asyncio event loop that handles many requests concurrently, but it only switches from one request to another at an `await`, when a request is waiting for something such as the bank. Plain code between two `await`s always runs to the end before any other request gets a turn.
+
+The endpoint looks up the key (`store.get`) and claims it (`store.create`) with no `await` in between, and none of the store's methods contain an `await`. So once a request has found that a key is new, no other request can run until that request has claimed it. If two identical requests arrive at the same moment, exactly one claims the key and the other finds it already claimed. No lock is needed.
+
+The endpoint is declared with `async def` on purpose. FastAPI runs endpoints declared with plain `def` in a pool of threads, and the operating system can switch threads at any line, including between looking up and claiming a key. That would allow two requests to claim the same key and charge twice.
+
+This guarantee only holds within one process. See 5.14 for running several processes or servers.
+
+### 5.2 In-memory key store
+
+Keys are kept in a Python dictionary inside the server process, which the brief allows. It needs no setup, and every lookup is fast.
+
+The consequences are that keys are lost when the server restarts, and that two server processes would each have their own separate store. Both are covered in 5.14.
+
+### 5.3 Comparing bodies with a canonical fingerprint
+
+To detect a key reused with a different payment, each key's record stores a fingerprint of the first body: a SHA-256 hash. A hash has a fixed size, is fast to compare, and means the store does not need to keep the payment details themselves.
+
+The hash is taken from a canonical form of the body, not from the raw bytes. The body is parsed, the amount is normalised, and it is written back out with the fields in sorted order and with no extra spaces. Without this, the same payment written differently would get a different hash and be wrongly rejected with `422`. For example, these all produce the same fingerprint:
+
+```
+{"amount": 100.5, "currency": "USD"}
+{"currency": "USD", "amount": 100.50}
+{"amount":100.500,"currency":"USD"}
+```
+
+### 5.4 Validating before the key is claimed
+
+Every check on the header and body runs before the store is touched. A rejected request therefore leaves nothing behind: the key is not used up, and the client can correct the request and send it again with the same key.
+
+FastAPI can validate request bodies automatically, but it does so before the endpoint's own code runs, in its own order, and it reports problems as `422` in its own format. Here `422` has a specific meaning (a key reused with a different body), the header must be checked before the body, and every validation error should look the same. So the endpoint reads the raw body and validates it itself, in the order shown in the flowchart. Because FastAPI can then no longer describe the body on its own, `app/api_docs.py` describes the headers, body and responses for the `/docs` page.
+
+### 5.5 Money is handled as Decimal, never float
+
+A `float` stores numbers in binary, and most decimal fractions, such as `0.1`, cannot be stored exactly in binary. Small errors appear and add up: `0.1 + 0.2` gives `0.30000000000000004`, and adding `0.10` a million times gives `100000.00000133288` instead of `100000.00`. `Decimal` stores the decimal digits themselves, so amounts stay exact.
+
+- The JSON body is parsed straight into `Decimal`, so an amount never passes through a `float` on the way in.
+- The response returns the amount as a string, such as `"100"` or `"250.50"`, because many JSON clients read numbers as floats.
+- Amounts are limited to 2 decimal places, and only currencies that use 2 decimal places are supported (`GHS`, `NGN`, `USD`, `EUR`, `GBP`). Currencies such as the Japanese yen (0 decimal places) or the Kuwaiti dinar (3) would need a rule per currency.
+- Systems that process very high volumes often store amounts as whole numbers of the smallest unit instead (for example `10050` pesewas for 100.50 GHS), which is both exact and fast. This project keeps the format from the brief, where amounts are given in cedis, dollars and so on.
+
+### 5.6 A strict request body
+
+The body must match exactly what a payment needs. Anything unexpected is rejected rather than guessed at.
+
+| Rejected | Why |
+|---|---|
+| Amount as a string (`"100"`) | Most likely a bug in the client. Accepting it would hide the bug |
+| Amount as `true` or `false` | In Python, `True` and `False` are also integers (`True == 1`), so this is checked explicitly |
+| Extra fields | They would change the fingerprint, so the same payment with a different extra field would get a `422` |
+| Duplicate fields, such as `"amount"` twice | Python's JSON parser silently keeps the last one, so the client and the server could disagree about the amount |
+| `NaN` and `Infinity` | Not valid JSON, although Python's parser accepts them by default |
+| Unsupported currencies | Only a fixed list of currencies is accepted, not any 3 letters, as a real payment processor would |
+| Keys longer than 255 characters | Keeps the memory used by each stored key small |
+
+### 5.7 422 for a key reused with a different body
+
+The brief allows `422 Unprocessable Entity` or `409 Conflict`. `422` was chosen because the request itself is well-formed, but it cannot be processed with that key. It also keeps `409` out of the API entirely, since the brief says in-flight duplicates must not receive `409`.
+
+The body check runs before the state check, so a different body is rejected immediately, even while the first request with that key is still processing.
+
+### 5.8 Duplicates that arrive during processing wait for the first result
+
+Each record holds an `asyncio.Event`, a signal that starts unset. When the first request finishes, successfully or not, it sets the signal. A duplicate that finds the record still `PROCESSING` waits on that signal. Waiting uses no CPU, and the duplicate wakes up the moment the first request finishes, then returns the saved result with `X-Cache-Hit: true`. Nothing is checked repeatedly on a timer.
+
+A duplicate does not wait forever. After `MAX_WAIT_SECONDS` (10 by default) it stops waiting and returns `503 Service Unavailable` with `Retry-After: 1`. The record is kept, so the retry gets the first request's result once it is ready. With the default settings this does not happen, because the bank timeout (5 seconds) ends the first request first. The limit is a safety net in case something unexpected keeps the first request running.
+
+### 5.9 A failed charge releases the key
+
+If the bank call fails or takes longer than `BANK_TIMEOUT_SECONDS`, the record is deleted, any waiting duplicates are told the first request failed, and `500` is returned. A retry with the same key is then processed as a new attempt. The failure is not saved and replayed, because it means the charge did not complete, and the client should be able to try again.
+
+The same happens if the request is cancelled while the bank call is in progress, for example because the server is shutting down. Without this, the key would stay `PROCESSING` forever.
+
+Releasing the key is only safe if the failure happened before any money moved. The simulated bank moves no real money, so here it is always safe. With a real bank, a timeout is uncertain: the bank may have charged and only its answer was lost. A real payment processor passes its own idempotency key or reference on to the bank, so that a repeated charge request is recognised there too, or asks the bank for the payment's status before trying again.
+
+### 5.10 Two separate time limits
+
+| Limit | Applies to | Default | Purpose |
+|---|---|---|---|
+| Bank timeout | Records in `PROCESSING` | 5 seconds | Stops a charge attempt from waiting on the bank forever |
+| Key expiry (TTL) | Records in `COMPLETED` | 24 hours | Remembers the result long enough for late retries, then frees the memory |
+
+`PROCESSING` records have no expiry. Forgetting a key while its charge is still in progress would let a retry start a second charge. A `PROCESSING` record always ends within the bank timeout instead, either by becoming `COMPLETED` or by being deleted.
+
+Expiry times are measured with a monotonic clock, which only moves forward. Changing the computer's date or time therefore cannot make keys expire early or never expire.
+
+### 5.11 Responses
+
+- A new charge returns `201 Created`, because a payment was created.
+- A replay returns exactly the saved status code and body, as the brief requires.
+- `X-Cache-Hit` is `false` on a response that was processed now and `true` on a replay.
+- Every successful response includes a `transaction_id`. A replay has the same id as the original, which shows that no second charge happened.
+
+### 5.12 Simulation mode is off by default
+
+The headers that make the simulated bank slow or fail are useful for testing, but a payment endpoint that its callers can tell to fail would be a weakness in a real deployment. They only work when the server is started with `SIMULATION_MODE=true`. When the mode is off, the headers are ignored whatever their value. When it is on, invalid values are rejected with `400`, so a typo such as `ture` does not silently do nothing.
+
+### 5.13 Status codes
+
+| Status | Meaning | Can the client retry with the same key? |
+|---|---|---|
+| `201` | Charged, or a replay of the charge | Not needed. A retry replays the same result |
+| `400` | The request is invalid | Yes, after correcting the request. The key was not used up |
+| `422` | The key belongs to a different payment | No. Send the original body, or use a new key for a new payment |
+| `500` | The charge did not complete | Yes. The key was released |
+| `503` | An identical request is still processing | Yes, after the `Retry-After` seconds |
+
+### 5.14 Known limitations and what production would add
+
+| Limitation | Effect | What a production system would add |
+|---|---|---|
+| Keys are kept in memory | A restart forgets every key, so a retry after a restart would be charged again | Keep keys in Redis or a database |
+| One process only | With several processes or servers, each has its own store, so two of them could both accept the same key | A shared store with an atomic claim, such as Redis `SET key value NX`. Waiting duplicates on other servers would also need a shared notification, such as Redis publish and subscribe |
+| No authentication | Anyone who can reach the server can send payments | Authenticate each client, for example with an API key |
+| Keys are not separated by client | Two clients that happen to use the same key string would collide: one would receive `422`, or a replay of the other's response | Store keys per client, so each client has its own key space |
+| Uncertain bank failures | See 5.9 | Pass an idempotency key or reference on to the bank |
