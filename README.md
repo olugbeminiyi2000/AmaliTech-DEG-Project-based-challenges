@@ -117,3 +117,89 @@ Checks run in this order. The first one that fails returns `400 Bad Request` wit
 | Currency | `currency` is one of `GHS`, `NGN`, `USD`, `EUR`, `GBP`. All five use 2 decimal places, which is why the precision rule holds for every supported currency |
 
 Amounts are handled as `Decimal`, never `float`, so values such as `0.10` are stored exactly.
+
+## Setup
+
+### Requirements
+
+- Python 3.12 (the version this project was built and tested with, on Windows 11)
+- Git
+
+### Install
+
+Clone the repository:
+
+```
+git clone https://github.com/olugbeminiyi2000/AmaliTech-DEG-Project-based-challenges.git
+cd AmaliTech-DEG-Project-based-challenges
+```
+
+Create a virtual environment and install the packages:
+
+| Shell | Commands |
+|---|---|
+| Windows cmd or PowerShell | `py -3.12 -m venv .venv` then `.venv\Scripts\python -m pip install -r requirements.txt` |
+| Git Bash on Windows | `py -3.12 -m venv .venv` then `.venv/Scripts/python -m pip install -r requirements.txt` |
+| macOS or Linux | `python3.12 -m venv .venv` then `.venv/bin/python -m pip install -r requirements.txt` |
+
+### Run the server
+
+| Shell | Command |
+|---|---|
+| Windows cmd or PowerShell | `.venv\Scripts\python -m app` |
+| Git Bash on Windows | `.venv/Scripts/python -m app` |
+| macOS or Linux | `.venv/bin/python -m app` |
+
+The server starts on `http://127.0.0.1:8000`:
+
+- `http://127.0.0.1:8000/docs` is the interactive API documentation, where every request can be tried in the browser. Opening `http://127.0.0.1:8000/` redirects here.
+- `http://127.0.0.1:8000/health` confirms the server is running.
+
+Stop the server with `Ctrl+C`.
+
+### Run the tests
+
+| Shell | Command |
+|---|---|
+| Windows cmd or PowerShell | `.venv\Scripts\python -m pytest` |
+| Git Bash on Windows | `.venv/Scripts/python -m pytest` |
+| macOS or Linux | `.venv/bin/python -m pytest` |
+
+All 67 tests should pass in about 10 seconds.
+
+### Configuration
+
+Every setting has a default, so the server runs without any configuration. To change a setting, set an environment variable before starting the server.
+
+| Variable | Default | What it controls |
+|---|---|---|
+| `PROCESSING_DELAY_SECONDS` | `2` | How long the simulated bank takes to charge a payment |
+| `BANK_TIMEOUT_SECONDS` | `5` | A bank call that takes longer than this fails with `500` |
+| `MAX_WAIT_SECONDS` | `10` | How long a duplicate request waits for an identical in-flight request before returning `503` |
+| `KEY_TTL_SECONDS` | `86400` (24 hours) | How long a completed key is remembered |
+| `CLEANUP_INTERVAL_SECONDS` | `60` | How often the background task removes expired keys |
+| `SIMULATION_MODE` | `false` | Turns on the `X-Simulate-Bank-*` headers (see below) |
+| `HOST` | `127.0.0.1` | Address the server listens on |
+| `PORT` | `8000` | Port the server listens on |
+
+Time values are in seconds and may be decimals, such as `0.5`. If a time value or `SIMULATION_MODE` is not valid (for example `BANK_TIMEOUT_SECONDS=five`, a negative number, or `SIMULATION_MODE=maybe`), the server refuses to start and prints which variable is wrong.
+
+Setting variables differs between shells. For example, to start with simulation mode on and a 20 second bank timeout:
+
+| Shell | Command |
+|---|---|
+| Windows cmd | `set SIMULATION_MODE=true& set BANK_TIMEOUT_SECONDS=20& .venv\Scripts\python -m app` |
+| PowerShell | `$env:SIMULATION_MODE="true"; $env:BANK_TIMEOUT_SECONDS="20"; .venv\Scripts\python -m app` |
+| Git Bash on Windows | `SIMULATION_MODE=true BANK_TIMEOUT_SECONDS=20 .venv/Scripts/python -m app` |
+| macOS or Linux | `SIMULATION_MODE=true BANK_TIMEOUT_SECONDS=20 .venv/bin/python -m app` |
+
+In cmd and PowerShell the variables stay set until that terminal is closed, so later commands in the same terminal use them too. In Git Bash, macOS and Linux, the form above applies only to that one command. In cmd, there is no space before `&`, because cmd would otherwise include the space in the value.
+
+### Simulation mode
+
+The bank is simulated: every payment takes `PROCESSING_DELAY_SECONDS` and succeeds. To test what happens when the bank is slow or fails, start the server with `SIMULATION_MODE=true`. Two optional request headers then control the simulated bank for that one request:
+
+- `X-Simulate-Bank-Delay`: how many seconds the bank takes, from `0` to `30`. A value above `BANK_TIMEOUT_SECONDS` makes the payment time out with `500`.
+- `X-Simulate-Bank-Failure`: `true` makes the bank fail with `500`.
+
+Simulation mode is off by default so that a running server cannot be told by its callers to slow down or fail. When it is off, both headers are ignored whatever their value. When it is on, an invalid value (for example a delay of `abc`) is rejected with `400`.
