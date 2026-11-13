@@ -12,6 +12,7 @@ A payment-processing API that charges each payment **at most once**, no matter h
 - [4. API Documentation](#4-api-documentation)
 - [5. Design Decisions](#5-design-decisions)
 - [6. Developer's Choice: Key Expiry](#6-developers-choice-key-expiry)
+- [7. Testing](#7-testing)
 
 ---
 
@@ -651,3 +652,86 @@ KEY_TTL_SECONDS=30 .venv/Scripts/python -m app
 3. Wait more than 30 seconds and send it again. It takes about 2 seconds and returns `201` with a new `transaction_id` and `x-cache-hit: false`: the key was forgotten.
 
 The automated tests `test_expired_key_is_processed_as_new` and `test_purge_removes_only_expired_keys` in `tests/test_api.py` check the same behaviour.
+
+---
+
+## 7. Testing
+
+### 7.1 Automated tests
+
+Run the tests with the command for your shell in 3.4. All 67 tests should pass. The API tests send real HTTP requests to the app, including several at the same time, with shorter delays than the defaults so that they finish in about 10 seconds.
+
+| What is tested | Tests | Count |
+|---|---|---|
+| User Story 1: first payment | `test_first_request_is_processed_and_charged` | 1 |
+| User Story 2: duplicate request | `test_duplicate_request_replays_saved_response_without_charging`, `test_same_payment_written_differently_counts_as_duplicate` | 2 |
+| User Story 3: same key, different body | `test_same_key_with_different_body_is_rejected`, `test_different_body_is_rejected_even_while_first_is_processing` | 2 |
+| Bonus: in-flight duplicates | `test_simultaneous_duplicates_are_charged_once_and_get_same_result`, `test_waiting_request_gets_500_when_first_request_fails`, `test_waiting_request_gets_503_when_max_wait_is_reached` | 3 |
+| Bank failure and timeout | `test_failed_processing_returns_500_and_releases_the_key`, `test_bank_timeout_is_treated_as_failure` | 2 |
+| Developer's Choice: key expiry | `test_expired_key_is_processed_as_new`, `test_purge_removes_only_expired_keys` | 2 |
+| Validation through the API | `test_missing_key_returns_400`, `test_invalid_body_returns_400_and_does_not_use_up_the_key` | 2 |
+| Simulation mode | `test_slow_bank_header_triggers_bank_timeout_in_simulation_mode`, `test_simulation_headers_are_ignored_when_simulation_mode_is_off`, `test_invalid_simulation_headers_return_400` (4 cases) | 6 |
+| Health check and API docs | `test_health_reports_simulation_mode`, `test_root_redirects_to_api_docs`, `test_api_docs_describe_headers_body_and_responses` | 3 |
+| Every validation rule, one by one (`tests/test_validation.py`) | Valid and invalid keys, malformed JSON, duplicate fields, `NaN` and `Infinity`, wrong fields, non-numeric amounts, zero and negative amounts, too many decimal places, unsupported currencies | 39 |
+| Settings from environment variables (`tests/test_config.py`) | Defaults, reading every variable, and invalid values stopping the server | 5 |
+
+Several tests check that the simulated bank was called exactly once, which is how they prove that a duplicate did not cause a second charge.
+
+### 7.2 Manual testing
+
+These steps check every behaviour by hand, using the interactive documentation at `http://127.0.0.1:8000/docs`. On that page, open `POST /process-payment` and click **Try it out**. Each step lists what to enter and what the response should be. For how to start the server with a setting in each shell, see 3.5 Configuration.
+
+#### 7.2.1 User stories (normal start)
+
+Start the server normally (3.3).
+
+| Step | Idempotency-Key | Body | Expected response |
+|---|---|---|---|
+| 1 | `story-1` | `{"amount": 100, "currency": "GHS"}` | After about 2 seconds: `201`, `"Charged 100 GHS"`, `x-cache-hit: false` |
+| 2 | `story-1` | `{"amount": 100, "currency": "GHS"}` | Immediately: `201`, the same `transaction_id`, `x-cache-hit: true` |
+| 3 | `story-1` | `{"amount": 500, "currency": "GHS"}` | Immediately: `422`, `"Idempotency key already used for a different request body."` |
+| 4 | (empty) | `{"amount": 100, "currency": "GHS"}` | `400`, `"Missing Idempotency-Key header."` |
+| 5 | `story-2` | `{"amount": "100", "currency": "GHS"}` | `400`, `"amount must be a number."` |
+| 6 | `story-2` | `{"amount": 100, "currency": "GHS"}` | After about 2 seconds: `201`, `x-cache-hit: false`. The invalid request in step 5 did not use up the key |
+| 7 | `story-3` | `{"amount": 100.555, "currency": "GHS"}` | `400`, at most 2 decimal places |
+| 8 | `story-3` | `{"amount": 100, "currency": "JPY"}` | `400`, currency must be one of the supported currencies |
+| 9 | `story-4` | `{"amount": 100, "currency": "GHS"}`, with `X-Simulate-Bank-Failure` set to `true` | `201`, because simulation mode is off and the header is ignored |
+
+**In-flight duplicate:** open `/docs` in a second browser tab. Enter the key `story-5` and the same body in both tabs, click **Execute** in the first tab and then straight away in the second. Both return `201` with the same `transaction_id`; the first shows `x-cache-hit: false` and the second `true`. The window is only 2 seconds; 7.2.3 gives a much longer one.
+
+#### 7.2.2 Bank failure and timeout (`SIMULATION_MODE=true`)
+
+| Step | Idempotency-Key | Simulation header | Expected response |
+|---|---|---|---|
+| 1 | `fail-1` | `X-Simulate-Bank-Failure: true` | After about 2 seconds: `500` |
+| 2 | `fail-1` | none | After about 2 seconds: `201`, `x-cache-hit: false`. The failed attempt released the key |
+| 3 | `slow-1` | `X-Simulate-Bank-Delay: 8` | After about 5 seconds (the bank timeout, not 8): `500` |
+| 4 | `slow-1` | none | After about 2 seconds: `201`, `x-cache-hit: false` |
+
+On `/docs`, the browser refuses a non-numeric delay such as `abc` before sending it. To check that the server also rejects it, use the curl example in 4.3.10.
+
+#### 7.2.3 A duplicate that waits long enough (`SIMULATION_MODE=true`, `BANK_TIMEOUT_SECONDS=20`, `MAX_WAIT_SECONDS=25`)
+
+Use two browser tabs with the same key and body. Only the first tab sends `X-Simulate-Bank-Delay`. Click **Execute** in the first tab, then in the second within a few seconds.
+
+| Step | Idempotency-Key | Delay in first tab | Expected response |
+|---|---|---|---|
+| 1 | `x-1` | `15` | After about 15 seconds, both tabs: `201` with the same `transaction_id`. First tab `x-cache-hit: false`, second tab `true` |
+| 2 | `x-2` | `25` | After about 20 seconds, both tabs: `500`. The first request's bank call timed out and the waiting request was told it failed |
+
+#### 7.2.4 A duplicate that stops waiting (`SIMULATION_MODE=true`, `BANK_TIMEOUT_SECONDS=20`, `MAX_WAIT_SECONDS=5`)
+
+Same two-tab method as 7.2.3.
+
+| Step | Idempotency-Key | Delay in first tab | Expected response |
+|---|---|---|---|
+| 1 | `y-1` | `15` | Second tab after about 5 seconds: `503` with `retry-after: 1`. First tab after about 15 seconds: `201`. Executing the second tab again then returns immediately with the same `transaction_id` and `x-cache-hit: true` |
+| 2 | `y-2` | `25` | Second tab after about 5 seconds: `503`. First tab after about 20 seconds: `500`. Executing the second tab again, without a delay, returns `201` with `x-cache-hit: false` after about 2 seconds: it was processed as a new attempt |
+
+#### 7.2.5 Key expiry (`KEY_TTL_SECONDS=30`)
+
+Follow the steps in 6.5.
+
+#### 7.2.6 Invalid settings (`BANK_TIMEOUT_SECONDS=five`)
+
+The server does not start and prints `BANK_TIMEOUT_SECONDS must be a number of seconds, got 'five'.` In cmd and PowerShell, clear the variable or close the terminal afterwards, because it stays set for the rest of that terminal session.
